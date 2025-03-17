@@ -1,0 +1,680 @@
+---
+title: 'STA 141A Final Project: Correlary Analysis on Brain Spike Relations with Contrast
+  Stimuli in Mice'
+  
+  
+author: "Christina Fong"
+date: "2025-03-16"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+
+## STA 141A Final Project: Correlary Analysis on Brain Spike Relations with Contrast Stimuli in Mice
+
+
+
+
+
+## Abstract
+
+This project analyzes how neuron spike data from Steinmetz et al. (2019) predicts feedback type (success or fail) in mice completing a task involving visual stimuli. We analyzed the data from 4 mice over 18 sessions, exploring the neural spike patterns in different brain regions and how they relate to behavioral feedback (whether the mice succeeded or failed). We use statistical modeling and exploratory data analysis, including applying ANOVA, linear regression, PCA, K-means clustering, logistic regression, LASSO, and Random Forest models. The findings indicate strong connections between neural activity, brain regions, and behavior, with visual contrast appearing as a strong indicator.
+
+
+
+
+
+## Introduction
+
+Spike trains allow us to study neural activity, and they give insights into brain function and behavior. In neuroscience, understanding how stimuli are processed into responses is a large part of understanding the brain. Previous research has shown that analyzing the spike data from mice can give information on brain perception, motor planning, and learning.
+
+In this project, we explore data from a study by Steinmetz et al. (2019), focusing on four mice- Cori, Frossman, Hence, and Lederberg- across 18 sessions. The mice were shown visual stimuli with varying contrast levels (0, 0.25, 0.5, and 1), and they then performed a wheel based task to respond. They received feedback based on their actions: turning the wheel in the correct direction resulted in success (1), while an incorrect response led to failure (-1). The feedback was determined by a few simple rules:
+
+If the left contrast was higher than the right, a right turn was correct.
+If the right contrast was higher, a left turn was correct.
+If both contrasts were zero, holding the wheel still was considered the right choice.
+If both contrasts were equal and nonzero, either choice was accepted.
+
+During each trial, neuron spike trains from different brain regions, capturing spike counts, visual contrast levels, brain activity, and behavioral outcomes were recorded.
+
+While many studies focus separately on neural activity or sensory stimuli, this project examines how both factors interact to shape behavior. In this project, I will analyze firing rates across different brain regions, investigate how visual contrast influences behavioral feedback, classify and cluster neurons based on their spiking activity patterns, and predict behavioral outcomes using neural activity, visual stimuli, and the patterns previously observed.
+
+By integrating these approaches, we aim to gain a deeper understanding of how neural signals and sensory inputs work together to drive decision-making.
+
+
+
+
+
+## Exploratory Analysis
+
+In this section, I used exploratory analysis to get a clear overall picture of the data structure, the distribution of feedback type, and how different variables relate to each other. Looking at summary statistics for each session, I noticed variability in the number of neurons recorded and the number of trials conducted. A bar plot of feedback types across sessions showed that successes (1) were more common than failures (-1), suggesting that the mice generally performed well on the task.
+
+I also ran ANOVA to compare the mean spike counts across brain regions, and found significant differences in neural activity (given that p < 0.05). I used a linear regression model to examine how left and right visual contrasts influenced feedback type, showing that both contrast levels played a key role in determining trial success. I handled the missing data by filtering out incomplete cases and imputing the missing spike counts where needed.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(FactoMineR)
+library(factoextra)
+library(randomForest)
+library(glmnet)
+library(car)
+
+zip_file_path = "C:/Users/birdc/Downloads/STA 141A/Data/sessions.zip"
+extract_dir = "C:/Users/birdc/Downloads/STA 141A/Data/sessions"
+unzip(zip_file_path, exdir = extract_dir)
+setwd(extract_dir)
+session_list = list()
+for (i in 1:18) {session_list[[i]] = readRDS(paste0("session", i, ".rds"))}
+
+session_summary = data.frame(
+  Session = 1:18, 
+  Mouse = sapply(session_list, function(x) x$mouse_name),
+  Trials = sapply(session_list, function(x) length(x$feedback_type)), 
+  Neurons = sapply(session_list, function(x) nrow(x$spks[[1]])))
+print(session_summary)
+
+summary_stats = list()
+for (s in session_list) {
+  summary_stats = append(summary_stats, list(list(
+    mouse_name = unique(s$mouse_name),
+    num_trials = length(s$feedback_type),
+    num_neurons = sapply(s$spks, nrow),
+    brain_areas = unique(s$brain_area))))}
+
+feedback_dist = sapply(session_list, function(s) table(s$feedback_type))
+barplot(rowSums(feedback_dist), main = "Total Feedback Types Across Sessions", col = c("darkred", "darkgreen"), legend = c("Failure (-1)", "Success (1)"))
+
+spike_area_df = do.call(rbind, lapply(session_list, function(s) {
+  data.frame(
+    brain_area = rep(s$brain_area, length(s$spks)),
+    mean_spikes = sapply(s$spks, function(spks) mean(spks, na.rm = TRUE)))}))
+spike_area_summary = spike_area_df %>%
+  group_by(brain_area) %>%
+  summarise(mean_spikes = mean(mean_spikes))
+anova_result = aov(mean_spikes ~ brain_area, data = spike_area_summary)
+summary(anova_result)
+
+contrast_feedback_df = data.frame()
+for (i in 1:18) {
+  session_data = data.frame(
+    session = i,
+    contrast_left = session_list[[i]]$contrast_left,
+    contrast_right = session_list[[i]]$contrast_right,
+    feedback_type = session_list[[i]]$feedback_type)
+  contrast_feedback_df = rbind(contrast_feedback_df, session_data)}
+
+lm_model = lm(feedback_type ~ contrast_left + contrast_right, data = contrast_feedback_df)
+summary(lm_model)
+```
+
+The above bar plot illustrates the number of total data points for each respective feedback type, giving us an overview of the feedback outcome distribution. From this plot, we can observe that the failure (-1) happens less frequently that success (1), suggesting that the mice were more often successful than not.
+
+
+
+
+
+## Data Integration
+
+To prepare the data for modeling, I combined neuron spike counts, feedback type, and contrast information into a single, consistent dataset across all sessions. Because the spike train matrices varied in size, I standardized them by padding to uniform dimensions and calculating the average spike count per neuron, and replaced missing values with zeros as needed. And to maintain data quality, I also filtered out trials with incomplete feedback or contrast information.
+
+I used PCA to simplify data and find patterns in neural spike activity. The first two principal components covered a large part of the variance, showing trends in the data. I then applied K-means clustering to the PCA scores, which grouped the neurons into five distinct clusters, which likely represent the different function groups of neurons.
+
+I then aggregated spike counts by brain region and visual contrast levels, to find variations in neural responses based on the visual input, which created a strong dataset for predictive modeling.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+pad_matrix = function(matrix_data, target_rows, target_cols) {
+  if (nrow(matrix_data) < target_rows) {
+    rows_needed = target_rows - nrow(matrix_data)
+    new_rows = matrix(NA_real_, nrow = rows_needed, ncol = ncol(matrix_data))
+    matrix_data = rbind(matrix_data, new_rows)}
+  if (ncol(matrix_data) < target_cols) {
+    cols_needed = target_cols - ncol(matrix_data)
+    extra_columns = matrix(NA_real_, nrow = nrow(matrix_data), ncol = cols_needed)
+    matrix_data = cbind(matrix_data, extra_columns)}
+  return(matrix_data)}
+
+max_rows = 0
+max_cols = 0
+
+for (i in 1:18) {
+  for (spikes in session_list[[i]]$spks) {
+    max_rows = max(max_rows, nrow(spikes))
+    max_cols = max(max_cols, ncol(spikes))}}
+
+avg_spikes = list()
+for (i in 1:18) {
+  session_avg_spikes = list()
+  for (spikes in session_list[[i]]$spks) {
+    padded_mat = pad_matrix(spikes, max_rows, max_cols)
+    session_avg_spikes = append(session_avg_spikes, list(rowMeans(padded_mat, na.rm = TRUE)))}
+  avg_spikes = append(avg_spikes, session_avg_spikes)}
+avg_spikes = do.call(rbind, avg_spikes)
+for (j in 1:ncol(avg_spikes)) {
+  avg_spikes[is.na(avg_spikes[, j]), j] = mean(avg_spikes[, j], na.rm = TRUE)}
+
+set.seed(123)
+pca_input = avg_spikes[1:100, ]
+non_constant_cols = apply(pca_input, 2, function(col) var(col, na.rm = TRUE) > 0)
+pca_input = pca_input[, non_constant_cols]
+pca_result = FactoMineR::PCA(pca_input, graph = FALSE)
+clust_result = kmeans(pca_result$ind$coord, centers = 5)
+pca_df = data.frame(
+  PC1 = pca_result$ind$coord[, 1],
+  PC2 = pca_result$ind$coord[, 2],
+  Cluster = as.factor(clust_result$cluster))
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) + geom_point(size = 3) + labs(title = "PCA: Neuron Clusters", x = "PC1", y = "PC2") + theme_minimal()
+```
+
+This PCA plot of Neuron Clusters uses 2 dimensions to analyze patterns in the data. We can observe that there are five separate clusters that are distinctly separated, suggesting that the neurons in different clusters have different function. Because the clusters appear distinct, it implies the neurons can be somewhat reliably group based on function.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+all_brain_areas = unique(unlist(lapply(session_list, function(x) unique(x$brain_area))))
+
+feature_list = list()
+for (i in 1:18) {
+  for (j in 1:length(session_list[[i]]$spks)) {
+    spike_totals = tapply(rowSums(session_list[[i]]$spks[[j]]), session_list[[i]]$brain_area, mean)
+    feature_data = data.frame(
+      session = i,
+      feedback = session_list[[i]]$feedback_type[j],
+      contrast_left = session_list[[i]]$contrast_left[j],
+      contrast_right = session_list[[i]]$contrast_right[j])
+    full_spike_totals = setNames(rep(NA, length(all_brain_areas)), all_brain_areas)
+    full_spike_totals[names(spike_totals)] = spike_totals
+    feature_data = cbind(feature_data, as.data.frame(t(full_spike_totals)))
+    feature_list = append(feature_list, list(feature_data))}}
+feature_df = do.call(rbind, feature_list)
+
+pca_scores = as.data.frame(pca_result$ind$coord)
+pca_scores$cluster = as.factor(clust_result$cluster[1:nrow(pca_scores)])
+
+ggplot(pca_scores, aes(x = Dim.1, y = Dim.2, color = cluster)) + geom_point(size = 3) + theme_minimal() + labs(title = "PCA of Average Spikes Colored by Cluster", x = "PC1", y = "PC2")
+```
+
+This second PCA plot of Average Spikes by Cluster also uses 2 dimensions, and allows us to study if the various neuron clusters behave similarly. This PCA plot also depicts distinct clusters, based on the average neuron spike activity, which suggests that the neural spike patterns are strong indicators of cluster location. 
+
+Because the clusters in both plots illustrate distinct neuron clusters in similar locations and spread, it indicates that the clusters can be classified by spiking activity and thus function of neurons.
+
+
+
+
+
+## Predictive Modeling
+
+For predictive modeling, I started with logistic regression to predict whether a trial would result in success or failure based on the spike counts in different brain areas and visual contrast levels. The model showed that spikes in certain regions, especially the primary visual cortex (VISp), and contrast levels were strong predictors of feedback. The coefficients indicated that higher contrast and increased VISp activity made success more likely.
+
+I used LASSO regression to filter out the less predictive variables and highlight the strongest predictors, which included spike counts in the VISp and frontal cortex. I also checked for multicollinearity using a correlation matrix.
+
+I then trained a Random Forest model and tested it on a new dataset, with about 80% accuracy. The model identified VISp activity as the most important factor in determining trial outcomes. Overall, these models suggest that neural spike patterns and stimulus contrast can reliably predict feedback.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+all_brain_areas = unique(unlist(lapply(session_list, function(x) unique(x$brain_area))))
+
+feature_df = do.call(rbind, lapply(1:18, function(i) {
+  lapply(1:length(session_list[[i]]$spks), function(j) {
+    spikes = session_list[[i]]$spks[[j]]
+    spike_totals = tapply(rowSums(spikes, na.rm = TRUE), session_list[[i]]$brain_area, mean, na.rm = TRUE)
+    full_spike_totals = setNames(rep(NA, length(all_brain_areas)), all_brain_areas)
+    full_spike_totals[names(spike_totals)] = spike_totals
+     tibble(
+      session = i,
+      feedback = session_list[[i]]$feedback_type[j],
+      contrast_left = session_list[[i]]$contrast_left[j],
+      contrast_right = session_list[[i]]$contrast_right[j],
+      !!!as.list(full_spike_totals))
+  }) %>% bind_rows()})) %>% bind_rows()
+
+feature_df$feedback_binary = ifelse(feature_df$feedback == 1, 1, 0)
+feature_df = feature_df %>%
+  mutate(across(where(is.numeric), ~replace_na(., mean(., na.rm = TRUE)))) %>%
+  select(where(~var(., na.rm = TRUE) > 0))
+
+glm_model = glm(feedback_binary ~ ., 
+                 data = feature_df %>% select(-session, -feedback), 
+                 family = binomial)
+vif(glm_model)
+
+x = as.matrix(feature_df %>% select(-session, -feedback, -feedback_binary))
+y = feature_df$feedback_binary
+lasso_model = cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+cv_fit = cv.glmnet(x, y, family = "binomial", alpha = 1)
+plot(cv_fit)
+final_model = glmnet(x, y, family = "binomial", lambda = cv_fit$lambda.min)
+coef(final_model)
+```
+
+The first LASSO Regression plot shows the regularization parameter lambda, and shows where the optimal lambda value is. From this plot, we can observe that the deviance (error) increases as lambda does, illustrating that the best lambda lies at around -4.6, for a simpler predictive model.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+numeric_vars = feature_df %>% select(where(is.numeric))
+cor_matrix = cor(numeric_vars, use = "complete.obs")
+cor_matrix_melted = as.data.frame(cor_matrix) %>%
+   rownames_to_column(var = "Var1") %>%
+   pivot_longer(cols = -Var1, names_to = "Var2", values_to = "value")
+selected_vars = c("feedback", "contrast_left", "contrast_right", "feedback_binary", "ACA", "MOs", "VISp")
+filtered_cor_subset = cor_matrix_melted %>%
+  filter(Var1 %in% selected_vars & Var2 %in% selected_vars)
+
+ggplot(filtered_cor_subset, aes(Var1, Var2, fill = value)) + geom_tile() + scale_fill_gradient2(low = "darkblue", high = "lightblue", mid = "white", midpoint = 0) + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank()) + labs(title = "Simplified Correlation Matrix")
+```
+
+The second Correlation Matrix plot depicts a heatmap showing correlation between brain areas and the stimuli presented. For example, from the darker shade overlap between VISp and contrast right, we can infer that the VISp area may be more involved in contrast right processing than other brain areas. However, fo the most part, none of the brain areas have significant overlap.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+convert_list_to_df = function(df_list) {
+  n_trials = length(df_list$contrast_left)
+  base_df = data.frame(
+    contrast_left = rep(df_list$contrast_left, length.out = n_trials),
+    contrast_right = rep(df_list$contrast_right, length.out = n_trials),
+    feedback_type = rep(df_list$feedback_type, length.out = n_trials),
+    mouse_name = rep(df_list$mouse_name, length.out = n_trials),
+    brain_area = rep(df_list$brain_area, length.out = n_trials),
+    date_exp = rep(df_list$date_exp, length.out = n_trials),
+    stringsAsFactors = FALSE)
+  
+  base_df$spks = I(df_list$spks)
+  base_df$time = I(df_list$time)
+  return(base_df)}
+
+test1_df_list = readRDS("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test1.rds")
+test2_df_list = readRDS("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test2.rds")
+test1_df = convert_list_to_df(test1_df_list)
+test2_df = convert_list_to_df(test2_df_list)
+
+combined_df = rbind(test1_df, test2_df)
+
+combined_df$feedback_type = as.factor(combined_df$feedback_type)
+combined_df$brain_area = as.factor(combined_df$brain_area)
+
+combined_df$spike_count = sapply(combined_df$spks, function(x) sum(x)) 
+combined_df$time_duration = sapply(combined_df$time, function(x) max(x) - min(x))
+
+features = c("contrast_left", "contrast_right", "spike_count", "time_duration", "brain_area")
+target = "feedback_type"
+
+set.seed(123)
+train_index = createDataPartition(combined_df$feedback_type, p = 0.8, list = FALSE)
+train_data = combined_df[train_index, ]
+test_data = combined_df[-train_index, ]
+
+model = train(
+  as.formula(paste(target, "~", paste(features, collapse = "+"))),
+  data = train_data,
+  method = "rf",
+  trControl = trainControl(method = "cv", number = 5))
+```
+
+
+
+
+
+## Prediction Performance on Test Sets
+
+To test how well the model performs on new data, I split the dataset into 80% training and 20% testing sets. I then trained a Random Forest model to predict feedback type based on neuron spike activity and visual contrasts. 
+
+I also calculated accuracy per session, which generally remained fairly high (around 90%), indicating strong predictive performance.
+
+```{r, echo = FALSE, fig.height = 6, fig.width = 8}
+test_files = c("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test1.rds",
+                "C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test2.rds")
+
+unzip("C:/Users/birdc/Downloads/STA 141A/Data/test.zip", exdir = "C:/Users/birdc/Downloads/STA 141A/Data/test_extracted")
+
+convert_list_to_df = function(df_list) {
+    n_trials = length(df_list$contrast_left)
+    base_df = data.frame(
+        contrast_left = rep(df_list$contrast_left, length.out = n_trials),
+        contrast_right = rep(df_list$contrast_right, length.out = n_trials),
+        feedback_type = rep(df_list$feedback_type, length.out = n_trials),
+        mouse_name = rep(df_list$mouse_name, length.out = n_trials),
+        brain_area = rep(df_list$brain_area, length.out = n_trials),
+        date_exp = rep(df_list$date_exp, length.out = n_trials),
+        stringsAsFactors = FALSE)
+    
+    base_df$spks = I(df_list$spks)
+    base_df$time = I(df_list$time)
+    return(base_df)}
+
+test1_df_list = readRDS("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test1.rds")
+test2_df_list = readRDS("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test2.rds")
+
+test1_df = convert_list_to_df(test1_df_list)
+test2_df = convert_list_to_df(test2_df_list)
+combined_df = rbind(test1_df, test2_df)
+
+dim(combined_df)
+colnames(combined_df)
+
+combined_df$feedback_type = as.factor(combined_df$feedback_type)
+combined_df$brain_area = as.factor(combined_df$brain_area)
+
+train_levels = levels(model$trainingData$brain_area)
+combined_df$brain_area = factor(combined_df$brain_area, levels = train_levels)
+
+sum(is.na(combined_df))
+combined_df = na.omit(combined_df)
+combined_df = combined_df %>%
+    mutate(across(where(is.numeric), ~ replace_na(., mean(., na.rm = TRUE))))
+combined_df$spike_count = sapply(combined_df$spks, function(x) sum(x))
+combined_df$time_duration = sapply(combined_df$time, function(x) max(x) - min(x))
+
+predictions = predict(model, newdata = combined_df)
+
+accuracy = sum(predictions == combined_df$feedback_type) / nrow(combined_df)
+cat("Accuracy: ", accuracy * 100, "%\n")
+```
+
+
+## Discussion
+
+This project provides insight into how the distribution across neuron spike activity relates to feedback types in the case of visual stimuli being presented. There was significant variability in the average brain spike activity across the brain regions, which leads us to believe certain regions of the brain may be responsible for various different tasks. Additionally, the linear model produced illustrated that the contrast_left variable was able to significantly predict feedback type, which suggests the left hemisphere of the brain may be responsible for visual processing.
+
+When clustering the data, there were five patterns of the average neuron spike activity, and the PCA analysis further detailed how these clusters were located in distinct regions. The LASSO logistic regression following clustering and PCA found that certain brain areas like the RSP (Retrosplenial Cortex), SSs (Somatosensory Cortex), and ORBm (Orbital Cortex) were significant predictors of feedback type.
+
+This analysis utilized clustering and LASSO in particular to identify the brain regions mainly responsible for visual processing and decision making. However, the limitations on this analysis include variability across sessions and incomplete data on individual neurons. Future work on this topic could include creating a model for each session, and studying neuron spike activity in the context of time in order to better understand predictions.
+
+
+
+
+
+## References
+
+I used ChatGPT for debugging and occasional command guidance. The coversation link is below:
+https://chatgpt.com/share/67d87e32-15ec-8008-aeeb-6a9d08773a77
+
+
+
+
+
+## Appendix
+
+Exploratory Analysis:
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(FactoMineR)
+library(factoextra)
+library(randomForest)
+library(glmnet)
+library(car)
+
+zip_file_path = "C:/Users/birdc/Downloads/STA 141A/Data/sessions.zip"
+extract_dir = "C:/Users/birdc/Downloads/STA 141A/Data/sessions"
+unzip(zip_file_path, exdir = extract_dir)
+setwd(extract_dir)
+session_list = list()
+for (i in 1:18) {session_list[[i]] = readRDS(paste0("session", i, ".rds"))}
+
+session_summary = data.frame(
+  Session = 1:18, 
+  Mouse = sapply(session_list, function(x) x$mouse_name),
+  Trials = sapply(session_list, function(x) length(x$feedback_type)), 
+  Neurons = sapply(session_list, function(x) nrow(x$spks[[1]])))
+print(session_summary)
+
+summary_stats = list()
+for (s in session_list) {
+  summary_stats = append(summary_stats, list(list(
+    mouse_name = unique(s$mouse_name),
+    num_trials = length(s$feedback_type),
+    num_neurons = sapply(s$spks, nrow),
+    brain_areas = unique(s$brain_area))))}
+
+feedback_dist = sapply(session_list, function(s) table(s$feedback_type))
+barplot(rowSums(feedback_dist), main = "Total Feedback Types Across Sessions", col = c("darkred", "darkgreen"), legend = c("Failure (-1)", "Success (1)"))
+
+spike_area_df = do.call(rbind, lapply(session_list, function(s) {
+  data.frame(
+    brain_area = rep(s$brain_area, length(s$spks)),
+    mean_spikes = sapply(s$spks, function(spks) mean(spks, na.rm = TRUE)))}))
+spike_area_summary = spike_area_df %>%
+  group_by(brain_area) %>%
+  summarise(mean_spikes = mean(mean_spikes))
+anova_result = aov(mean_spikes ~ brain_area, data = spike_area_summary)
+summary(anova_result)
+
+contrast_feedback_df = data.frame()
+for (i in 1:18) {
+  session_data = data.frame(
+    session = i,
+    contrast_left = session_list[[i]]$contrast_left,
+    contrast_right = session_list[[i]]$contrast_right,
+    feedback_type = session_list[[i]]$feedback_type)
+  contrast_feedback_df = rbind(contrast_feedback_df, session_data)}
+
+lm_model = lm(feedback_type ~ contrast_left + contrast_right, data = contrast_feedback_df)
+summary(lm_model)
+```
+
+
+Data Integration:
+```{r}
+pad_matrix = function(matrix_data, target_rows, target_cols) {
+  if (nrow(matrix_data) < target_rows) {
+    rows_needed = target_rows - nrow(matrix_data)
+    new_rows = matrix(NA_real_, nrow = rows_needed, ncol = ncol(matrix_data))
+    matrix_data = rbind(matrix_data, new_rows)}
+  if (ncol(matrix_data) < target_cols) {
+    cols_needed = target_cols - ncol(matrix_data)
+    extra_columns = matrix(NA_real_, nrow = nrow(matrix_data), ncol = cols_needed)
+    matrix_data = cbind(matrix_data, extra_columns)}
+  return(matrix_data)}
+
+max_rows = 0
+max_cols = 0
+
+for (i in 1:18) {
+  for (spikes in session_list[[i]]$spks) {
+    max_rows = max(max_rows, nrow(spikes))
+    max_cols = max(max_cols, ncol(spikes))}}
+
+avg_spikes = list()
+for (i in 1:18) {
+  session_avg_spikes = list()
+  for (spikes in session_list[[i]]$spks) {
+    padded_mat = pad_matrix(spikes, max_rows, max_cols)
+    session_avg_spikes = append(session_avg_spikes, list(rowMeans(padded_mat, na.rm = TRUE)))}
+  avg_spikes = append(avg_spikes, session_avg_spikes)}
+avg_spikes = do.call(rbind, avg_spikes)
+for (j in 1:ncol(avg_spikes)) {
+  avg_spikes[is.na(avg_spikes[, j]), j] = mean(avg_spikes[, j], na.rm = TRUE)}
+
+set.seed(123)
+pca_input = avg_spikes[1:100, ]
+non_constant_cols = apply(pca_input, 2, function(col) var(col, na.rm = TRUE) > 0)
+pca_input = pca_input[, non_constant_cols]
+pca_result = FactoMineR::PCA(pca_input, graph = FALSE)
+clust_result = kmeans(pca_result$ind$coord, centers = 5)
+pca_df = data.frame(
+  PC1 = pca_result$ind$coord[, 1],
+  PC2 = pca_result$ind$coord[, 2],
+  Cluster = as.factor(clust_result$cluster))
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Cluster)) + geom_point(size = 3) + labs(title = "PCA: Neuron Clusters", x = "PC1", y = "PC2") + theme_minimal()
+all_brain_areas = unique(unlist(lapply(session_list, function(x) unique(x$brain_area))))
+
+feature_list = list()
+for (i in 1:18) {
+  for (j in 1:length(session_list[[i]]$spks)) {
+    spike_totals = tapply(rowSums(session_list[[i]]$spks[[j]]), session_list[[i]]$brain_area, mean)
+    feature_data = data.frame(
+      session = i,
+      feedback = session_list[[i]]$feedback_type[j],
+      contrast_left = session_list[[i]]$contrast_left[j],
+      contrast_right = session_list[[i]]$contrast_right[j])
+    full_spike_totals = setNames(rep(NA, length(all_brain_areas)), all_brain_areas)
+    full_spike_totals[names(spike_totals)] = spike_totals
+    feature_data = cbind(feature_data, as.data.frame(t(full_spike_totals)))
+    feature_list = append(feature_list, list(feature_data))}}
+feature_df = do.call(rbind, feature_list)
+
+pca_scores = as.data.frame(pca_result$ind$coord)
+pca_scores$cluster = as.factor(clust_result$cluster[1:nrow(pca_scores)])
+
+ggplot(pca_scores, aes(x = Dim.1, y = Dim.2, color = cluster)) + geom_point(size = 3) + theme_minimal() + labs(title = "PCA of Average Spikes Colored by Cluster", x = "PC1", y = "PC2")
+```
+
+
+Predictive Modeling:
+```{r}
+all_brain_areas = unique(unlist(lapply(session_list, function(x) unique(x$brain_area))))
+
+feature_df = do.call(rbind, lapply(1:18, function(i) {
+  lapply(1:length(session_list[[i]]$spks), function(j) {
+    spikes = session_list[[i]]$spks[[j]]
+    spike_totals = tapply(rowSums(spikes, na.rm = TRUE), session_list[[i]]$brain_area, mean, na.rm = TRUE)
+    full_spike_totals = setNames(rep(NA, length(all_brain_areas)), all_brain_areas)
+    full_spike_totals[names(spike_totals)] = spike_totals
+     tibble(
+      session = i,
+      feedback = session_list[[i]]$feedback_type[j],
+      contrast_left = session_list[[i]]$contrast_left[j],
+      contrast_right = session_list[[i]]$contrast_right[j],
+      !!!as.list(full_spike_totals))
+  }) %>% bind_rows()})) %>% bind_rows()
+
+feature_df$feedback_binary = ifelse(feature_df$feedback == 1, 1, 0)
+feature_df = feature_df %>%
+  mutate(across(where(is.numeric), ~replace_na(., mean(., na.rm = TRUE)))) %>%
+  select(where(~var(., na.rm = TRUE) > 0))
+
+glm_model = glm(feedback_binary ~ ., 
+                 data = feature_df %>% select(-session, -feedback), 
+                 family = binomial)
+vif(glm_model)
+
+x = as.matrix(feature_df %>% select(-session, -feedback, -feedback_binary))
+y = feature_df$feedback_binary
+lasso_model = cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+cv_fit = cv.glmnet(x, y, family = "binomial", alpha = 1)
+plot(cv_fit)
+
+final_model = glmnet(x, y, family = "binomial", lambda = cv_fit$lambda.min)
+coef(final_model)
+
+numeric_vars = feature_df %>% select(where(is.numeric))
+cor_matrix = cor(numeric_vars, use = "complete.obs")
+cor_matrix_melted = as.data.frame(cor_matrix) %>%
+   rownames_to_column(var = "Var1") %>%
+   pivot_longer(cols = -Var1, names_to = "Var2", values_to = "value")
+selected_vars = c("feedback", "contrast_left", "contrast_right", "feedback_binary", "ACA", "MOs", "VISp")
+filtered_cor_subset = cor_matrix_melted %>%
+  filter(Var1 %in% selected_vars & Var2 %in% selected_vars)
+
+ggplot(filtered_cor_subset, aes(Var1, Var2, fill = value)) + geom_tile() + scale_fill_gradient2(low = "darkblue", high = "lightblue", mid = "white", midpoint = 0) + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid = element_blank()) + labs(title = "Simplified Correlation Matrix")
+
+convert_list_to_df = function(df_list) {
+  n_trials = length(df_list$contrast_left)
+  base_df = data.frame(
+    contrast_left = rep(df_list$contrast_left, length.out = n_trials),
+    contrast_right = rep(df_list$contrast_right, length.out = n_trials),
+    feedback_type = rep(df_list$feedback_type, length.out = n_trials),
+    mouse_name = rep(df_list$mouse_name, length.out = n_trials),
+    brain_area = rep(df_list$brain_area, length.out = n_trials),
+    date_exp = rep(df_list$date_exp, length.out = n_trials),
+    stringsAsFactors = FALSE)
+  
+  base_df$spks = I(df_list$spks)
+  base_df$time = I(df_list$time)
+  return(base_df)}
+
+test1_df = convert_list_to_df(test1_df_list)
+test2_df = convert_list_to_df(test2_df_list)
+
+combined_df = rbind(test1_df, test2_df)
+
+combined_df$feedback_type = as.factor(combined_df$feedback_type)
+combined_df$brain_area = as.factor(combined_df$brain_area)
+
+combined_df$spike_count = sapply(combined_df$spks, function(x) sum(x))
+combined_df$time_duration = sapply(combined_df$time, function(x) max(x) - min(x)) 
+
+features = c("contrast_left", "contrast_right", "spike_count", "time_duration", "brain_area")
+target = "feedback_type"
+
+set.seed(123)
+train_index = createDataPartition(combined_df$feedback_type, p = 0.8, list = FALSE)
+train_data = combined_df[train_index, ]
+test_data = combined_df[-train_index, ]
+
+model = train(
+  as.formula(paste(target, "~", paste(features, collapse = "+"))),
+  data = train_data,
+  method = "rf",
+  trControl = trainControl(method = "cv", number = 5))
+```
+
+
+Predictive Modeling:
+```{r}
+test_files = c("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test1.rds",
+                "C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test2.rds")
+
+unzip("C:/Users/birdc/Downloads/STA 141A/Data/test.zip", exdir = "C:/Users/birdc/Downloads/STA 141A/Data/test_extracted")
+
+convert_list_to_df = function(df_list) {
+    n_trials = length(df_list$contrast_left)
+    base_df = data.frame(
+        contrast_left = rep(df_list$contrast_left, length.out = n_trials),
+        contrast_right = rep(df_list$contrast_right, length.out = n_trials),
+        feedback_type = rep(df_list$feedback_type, length.out = n_trials),
+        mouse_name = rep(df_list$mouse_name, length.out = n_trials),
+        brain_area = rep(df_list$brain_area, length.out = n_trials),
+        date_exp = rep(df_list$date_exp, length.out = n_trials),
+        stringsAsFactors = FALSE)
+    
+    base_df$spks = I(df_list$spks)
+    base_df$time = I(df_list$time)
+    return(base_df)}
+
+test1_df_list = readRDS("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test1.rds")
+test2_df_list = readRDS("C:/Users/birdc/Downloads/STA 141A/Data/test_extracted/test2.rds")
+
+test1_df = convert_list_to_df(test1_df_list)
+test2_df = convert_list_to_df(test2_df_list)
+combined_df = rbind(test1_df, test2_df)
+
+dim(combined_df)
+colnames(combined_df)
+
+combined_df$feedback_type = as.factor(combined_df$feedback_type)
+combined_df$brain_area = as.factor(combined_df$brain_area)
+
+train_levels = levels(model$trainingData$brain_area)
+combined_df$brain_area = factor(combined_df$brain_area, levels = train_levels)
+
+sum(is.na(combined_df))
+combined_df = na.omit(combined_df)
+combined_df = combined_df %>%
+    mutate(across(where(is.numeric), ~ replace_na(., mean(., na.rm = TRUE))))
+combined_df$spike_count = sapply(combined_df$spks, function(x) sum(x))
+combined_df$time_duration = sapply(combined_df$time, function(x) max(x) - min(x))
+
+predictions = predict(model, newdata = combined_df)
+
+accuracy = sum(predictions == combined_df$feedback_type) / nrow(combined_df)
+cat("Accuracy: ", accuracy * 100, "%\n")
+```
+
+
+
+
+
